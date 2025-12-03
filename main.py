@@ -1,10 +1,4 @@
-import os
-import html
-import time
-import logging
-import requests
-import threading
-import sys
+import os, html, time, logging, requests, threading, sys
 from urllib.parse import quote_plus, urlparse, parse_qs
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from telegram import Update
@@ -65,6 +59,11 @@ class _SimpleHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def do_HEAD(self):
+        self.send_response(200)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
     def do_GET(self):
         path = urlparse(self.path).path
         if path == "/ping":
@@ -101,14 +100,10 @@ def run_keepalive_server_in_thread(host: str, port: int):
     logger.info("Keep-alive server started on %s:%s", host, port)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "Send me a Terabox link.\n— Powered by @Regnis"
-    )
+    await update.message.reply_text("Send me a Terabox link.\n— Powered by @Regnis")
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "Send a Terabox share link and I'll return a clean direct download link.\n— Powered by @Regnis"
-    )
+    await update.message.reply_text("Send a Terabox share link and I'll return a clean direct download link.\n— Powered by @Regnis")
 
 async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global last_user_activity
@@ -169,9 +164,6 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle))
     logger.info("Bot started (polling)...")
     app.run_polling()
-
-def _exit(signum, frame):
-    sys.exit(0)
 
 if __name__ == "__main__":
     main()
