@@ -4,17 +4,15 @@ import time
 import logging
 import requests
 import threading
-import asyncio
-import signal
 import sys
-from urllib.parse import quote_plus
-from aiohttp import web
+from urllib.parse import quote_plus, urlparse, parse_qs
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 if not BOT_TOKEN:
-    raise RuntimeError("BOT_TOKEN not set.")
+    raise RuntimeError("BOT_TOKEN not set")
 
 TERADL_PATTERN = "https://teradl.tiiny.io/?key=RushVx&link={link}"
 COOLDOWN_SECONDS = 15
@@ -36,51 +34,71 @@ def build_api_url(shared_link: str) -> str:
 
 def parse_json(data):
     results = []
-    arr = data.get("data") or []
+    if not isinstance(data, dict):
+        return results
+    arr = data.get("data") or data.get("items") or []
+    if not isinstance(arr, list):
+        return results
     for item in arr:
-        title = item.get("title") or "Unknown File"
-        download = item.get("download")
-        size = item.get("size") or ""
-        if download:
-            results.append((title, download, size))
+        if not isinstance(item, dict):
+            continue
+        title = item.get("title") or item.get("name") or "Unknown File"
+        download = item.get("download") or item.get("url") or item.get("link")
+        size = item.get("size") or item.get("filesize") or ""
+        if isinstance(download, str) and (download.startswith("http://") or download.startswith("https://")):
+            results.append((str(title), download, str(size)))
     return results
 
-def _require_token(request):
-    if KEEPALIVE_SECRET:
-        token = request.query.get("token")
-        return token == KEEPALIVE_SECRET
-    return True
+def _require_token_qs(path_qs):
+    if not KEEPALIVE_SECRET:
+        return True
+    qs = parse_qs(urlparse(path_qs).query)
+    token_vals = qs.get("token") or []
+    return (token_vals and token_vals[0] == KEEPALIVE_SECRET)
 
-async def handle_ping(request):
-    global last_ping
-    if not _require_token(request):
-        return web.json_response({"ok": False}, status=403)
-    last_ping = time.time()
-    return web.json_response({"ok": True, "timestamp": last_ping})
+class _SimpleHandler(BaseHTTPRequestHandler):
+    def _send_json(self, payload, status=200):
+        data = (str(payload).replace("'", '"')).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
 
-async def handle_health(request):
-    if not _require_token(request):
-        return web.json_response({"ok": False}, status=403)
-    now = time.time()
-    return web.json_response({
-        "ok": True,
-        "uptime": int(now - start_time),
-        "pid": os.getpid(),
-        "last_user_activity": int(last_user_activity) if last_user_activity else None,
-        "last_ping": int(last_ping) if last_ping else None
-    })
+    def do_GET(self):
+        path = urlparse(self.path).path
+        if path == "/ping":
+            if not _require_token_qs(self.path):
+                self._send_json({"ok": False, "error": "invalid token"}, status=403)
+                return
+            global last_ping
+            last_ping = int(time.time())
+            self._send_json({"ok": True, "timestamp": last_ping})
+            return
+        if path == "/health":
+            if not _require_token_qs(self.path):
+                self._send_json({"ok": False, "error": "invalid token"}, status=403)
+                return
+            now = int(time.time())
+            self._send_json({
+                "ok": True,
+                "uptime": int(now - start_time),
+                "pid": os.getpid(),
+                "last_user_activity": int(last_user_activity) if last_user_activity else None,
+                "last_ping": int(last_ping) if last_ping else None,
+                "time": now
+            })
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain")
+        self.end_headers()
+        self.wfile.write(b"OK")
 
 def run_keepalive_server_in_thread(host: str, port: int):
-    app = web.Application()
-    app.router.add_get("/ping", handle_ping)
-    app.router.add_get("/health", handle_health)
-    async def index(req):
-        return web.Response(text="OK")
-    app.router.add_get("/", index)
-    def _run():
-        web.run_app(app, host=host, port=port)
-    t = threading.Thread(target=_run, daemon=True)
+    server = HTTPServer((host, port), _SimpleHandler)
+    t = threading.Thread(target=server.serve_forever, daemon=True)
     t.start()
+    logger.info("Keep-alive server started on %s:%s", host, port)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
@@ -89,7 +107,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "Just send a Terabox share link.\n— Powered by @Regnis"
+        "Send a Terabox share link and I'll return a clean direct download link.\n— Powered by @Regnis"
     )
 
 async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -149,13 +167,11 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle))
+    logger.info("Bot started (polling)...")
     app.run_polling()
 
 def _exit(signum, frame):
     sys.exit(0)
-
-signal.signal(signal.SIGTERM, _exit)
-signal.signal(signal.SIGINT, _exit)
 
 if __name__ == "__main__":
     main()
